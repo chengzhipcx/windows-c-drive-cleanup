@@ -32,7 +32,8 @@ git clone https://github.com/chengzhipcx/windows-c-drive-cleanup.git ~/.agents/s
 | 文件 | 说明 |
 |---|---|
 | `SKILL.md` | 完整工作流:分析 → 分档清理 → 缓存迁移 → 验证,含 Git Bash 环境踩坑记录 |
-| `scripts/scan_c_drive.sh` | 一键扫描脚本:磁盘总览、热点目录、`_MEI*` 残留、系统可清理项、现有缓存配置 |
+| `scripts/scan_c_drive.sh` | 分层扫描脚本:`--tier1` 快扫热点 / `--tier2` AppData 全量 / `--tier3` 顶层目录,`--json` 程序化输出 |
+| `scripts/clean_c_drive.sh` | 零风险档清理:默认 dry-run 只列清单,`--apply` 才执行;Temp(_MEI* 残留)+ npm/Yarn/uv/pip 缓存 + VS Code 扩展缓存 |
 
 ## 工作流概览
 

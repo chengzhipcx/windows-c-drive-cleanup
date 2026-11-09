@@ -1,6 +1,6 @@
 ---
 name: windows-c-drive-cleanup
-description: Windows C 盘空间分析与清理,以及开发缓存(npm/Yarn/uv/Bun)迁移到其他磁盘。当用户提到 C 盘满了、磁盘空间不足、清理磁盘、释放空间、Temp 临时文件、AppData 占用大、包管理器缓存迁移时使用;即使用户只是随口问"C 盘怎么又满了"也应触发本技能。
+description: Windows C 盘空间分析与清理,以及开发缓存(npm/Yarn/uv/Bun/pip/pnpm)迁移到其他磁盘。当用户提到 C 盘满了、磁盘空间不足、清理磁盘、释放空间、电脑变卡想清理、Temp 临时文件、AppData 占用大、HuggingFace/模型缓存、Docker 虚拟磁盘过大、包管理器缓存迁移时使用;即使用户只是随口问"C 盘怎么又满了"也应触发本技能。
 ---
 
 # Windows C 盘清理与缓存迁移
@@ -15,11 +15,20 @@ description: Windows C 盘空间分析与清理,以及开发缓存(npm/Yarn/uv/B
 4. 迁移(推荐主动提出):包管理器缓存迁到大容量盘
 5. 验证:对比清理前后剩余空间,如实汇报
 
-可以配合本技能自带的扫描脚本快速拿到分析数据:
+本技能自带两个脚本,优先用它们而不是临时拼命令:
 
 ```bash
-bash scripts/scan_c_drive.sh <用户名>   # 默认 Administrator
+# 扫描(分层控制耗时,--json 便于程序处理)
+bash scripts/scan_c_drive.sh --tier1 <用户名>   # 只扫已知热点,约 1 分钟
+bash scripts/scan_c_drive.sh --tier2 <用户名>   # 默认:热点 + AppData 全量
+bash scripts/scan_c_drive.sh --tier3 --json <用户名>  # 加顶层目录,最慢
+
+# 零风险档清理:默认 dry-run 只列清单,确认后加 --apply 才执行
+bash scripts/clean_c_drive.sh <用户名>
+bash scripts/clean_c_drive.sh --apply <用户名>
 ```
+
+清理脚本体现了一个关键原则:**破坏性操作必须先 dry-run 展示清单,经确认再执行**。自己拼清理命令时也遵守这个原则。
 
 ## 第一步:磁盘分析
 
@@ -60,18 +69,36 @@ du -s -B1 /c/Windows/SoftwareDistribution/Download /c/Windows/Temp /c/Windows/In
 | `AppData\Local\npm-cache` | 2~5GB | npm 缓存 |
 | `AppData\Local\Yarn` | 3~5GB | Yarn 缓存 |
 | `AppData\Local\uv` | 1~4GB | uv 缓存 |
+| `AppData\Local\pip` | 0.5~3GB | pip 缓存(`pip cache purge`) |
+| `AppData\Local\pnpm` | 1~5GB | pnpm store(`pnpm store prune`) |
 | `AppData\Roaming\Code\CachedExtensionVSIXs` | 1~2GB | VS Code 扩展安装包缓存 |
-| `AppData\Local\ms-playwright` | ~2GB | Playwright 浏览器 |
-| `AppData\Local\Google` | 5GB+ | Chrome 数据,只能清其中 Cache 子目录 |
-| `AppData\Roaming\Tencent`、微信/钉钉等 | 3~5GB | 聊天数据,**禁区** |
+| `AppData\Local\ms-playwright` | ~2GB | Playwright 浏览器(`npx playwright uninstall --all` 可删) |
+| `~\.cache` | 1~30GB | HuggingFace 模型(`~\.cache\huggingface`)、torch 等缓存;AI 用户重点排查 |
+| `~\.ollama` | 2~50GB | Ollama 本地模型 |
+| `AppData\Local\Docker` | 5~30GB | Docker Desktop 的 `ext4.vhdx` 虚拟磁盘,**只增不减**;要在 Docker 设置里迁盘或 `docker system prune` 后 compact vhdx |
+| `AppData\Local\NVIDIA\DXCache`、`GLCache` | 0.5~2GB | 着色器缓存,可删会重建 |
+| `AppData\Local\Google` | 5GB+ | Chrome 数据,只能清其中 Cache/Code Cache/GPUCache 子目录 |
+| `miniconda3`/`anaconda3`(若在 C 盘) | 3~20GB | conda 环境;`conda clean --all` 清缓存,环境本身需确认 |
+| `AppData\Roaming\Tencent`、微信/钉钉等 | 3~5GB | 聊天数据,**禁区**(微信可在设置里把存储迁到 D 盘) |
+| `/c/Windows.old` | 10~30GB | 旧系统备份,升级后 10 天可自动清;`cleanmgr` 里"以前的 Windows 安装"删除 |
 
 先按这张表定向排查,再结合 du 扫描结果补充本机特有大户。
+
+### 非开发类大户与系统级手段
+
+开发缓存之外,按顺序考虑这些(收益从高到低):
+
+1. **微信/QQ 存储迁移**:微信 设置→文件管理→更改目录到 D 盘(迁移自带搬运,比手动搬安全)。
+2. **磁盘清理 cleanmgr**:运行 `cleanmgr /d C:`,勾选"Windows 更新清理""以前的 Windows 安装""缩略图"等;先 `cleanmgr /sageset:1` 配置可复用。
+3. **组件存储清理**:`Dism /Online /Cleanup-Image /StartComponentCleanup`(WinSxS 瘦身,通常回收 1~3GB,勿加 /ResetBase 以保留卸载补丁能力)。
+4. **存储感知**:设置→系统→存储 开启存储感知,自动定期清 Temp 和回收站,治本。
+5. **系统还原点**:`vssadmin list shadowstorage` 查占用;一般不建议动,除非占用异常。
 
 ## 第二步:分档清理
 
 分析完先给报告,按风险分档,**让用户选择执行范围**,不要擅自清理:
 
-- **第一档(零风险,默认推荐)**:Temp(保留活跃会话目录)、npm/Yarn/uv 缓存、VS Code `CachedExtensionVSIXs`。包缓存删后自动重建,代价只是下次装包慢一点。
+- **第一档(零风险,默认推荐)**:Temp(保留活跃会话目录)、npm/Yarn/uv/pip 缓存、VS Code `CachedExtensionVSIXs`。包缓存删后自动重建,代价只是下次装包慢一点。这一档可直接用 `scripts/clean_c_drive.sh`(先 dry-run 看 `--apply`)。
 - **第二档(需用户确认)**:Playwright 浏览器、Chrome 的 Cache 子目录、各 AI IDE(TRAE/Code 等)的缓存目录。逐项说明用途后再删。
 - **禁区(无论用户多着急都不碰)**:Tencent/微信/QQ 数据、`Documents`、浏览器 Profile、`Windows\Installer`(卸载修复依赖)、用途不明的目录。
 
@@ -99,6 +126,8 @@ uv cache clean
 | uv | `setx UV_CACHE_DIR "D:\cache\uv"` | 新终端 |
 | Yarn 1.x | `setx YARN_CACHE_FOLDER "D:\cache\yarn"` | 新终端 |
 | Bun | `setx BUN_INSTALL "D:\cache\bun"` + 修改 PATH | 新终端 |
+| pip | `pip config set global.cache-dir D:\cache\pip` | 立即 |
+| pnpm | `pnpm config set store-dir D:\cache\pnpm-store` | 立即(已有项目重装依赖后生效) |
 
 - `setx` 写用户级注册表。验证一律用 PowerShell 读(`reg query /v` 的 `/v` 会被 Git Bash 转义成路径,不可用):
   ```bash
