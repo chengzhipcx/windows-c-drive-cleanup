@@ -51,6 +51,15 @@ git clone https://github.com/chengzhipcx/windows-c-drive-cleanup.git ~/.agents/s
 - 搬运必须先校验大小/文件数再删源
 - `setx` 后已开终端读不到新值,`reg query /v` 在 Git Bash 下不可用
 
-## 许可
+## 关于作者
 
-MIT
+- 个人网站：[codercheng.xyz](https://codercheng.xyz)
+- 微信公众号：**coder程**（微信搜一搜，或扫码关注）
+
+<p align="center">
+  <img src="wechat-codercheng.png" width="560" alt="微信公众号：coder程">
+</p>
+
+## License
+
+[MIT](LICENSE)
