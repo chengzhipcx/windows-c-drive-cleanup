@@ -1,0 +1,140 @@
+---
+name: windows-c-drive-cleanup
+description: Windows C 盘空间分析与清理,以及开发缓存(npm/Yarn/uv/Bun)迁移到其他磁盘。当用户提到 C 盘满了、磁盘空间不足、清理磁盘、释放空间、Temp 临时文件、AppData 占用大、包管理器缓存迁移时使用;即使用户只是随口问"C 盘怎么又满了"也应触发本技能。
+---
+
+# Windows C 盘清理与缓存迁移
+
+实测有效的完整流程(2026-11 在 Windows 11 + Git Bash 环境验证,单次释放 27GB)。核心思路:**先分析再动手、按风险分档让用户选择、清完顺手迁移缓存防复发**。
+
+## 总流程
+
+1. 分析:磁盘总览 → 排除误判项 → 大目录扫描 → 定位热点
+2. 报告:表格呈现数据,按风险分档给方案,让用户选择执行范围
+3. 清理:按用户选定的档位执行
+4. 迁移(推荐主动提出):包管理器缓存迁到大容量盘
+5. 验证:对比清理前后剩余空间,如实汇报
+
+可以配合本技能自带的扫描脚本快速拿到分析数据:
+
+```bash
+bash scripts/scan_c_drive.sh <用户名>   # 默认 Administrator
+```
+
+## 第一步:磁盘分析
+
+### 磁盘总览
+
+Git Bash 里 PowerShell 的 `$_` 会被 shell 吞掉,统一用 `\$_` 转义:
+
+```bash
+powershell -NoProfile -Command "Get-CimInstance Win32_LogicalDisk | ForEach-Object { '{0} 总:{1:N0}GB 已用:{2:N0}GB 剩余:{3:N0}GB' -f \$_.DeviceID, (\$_.Size/1GB), ((\$_.Size-\$_.FreeSpace)/1GB), (\$_.FreeSpace/1GB) }"
+```
+
+### 排除误判项(动手前先确认,避免白忙)
+
+- **pagefile.sys / hiberfil.sys**:`ls -la /c/ | grep -iE "pagefile|hiberfil"`。若虚拟内存已配到其他盘,这块不占 C 盘。
+- **WSL 虚拟磁盘**:`wsl --list -v`(输出乱码通常意味着未安装发行版);再 `find /c/Users -maxdepth 5 -name "*.vhdx"` 兜底。
+
+### 大目录扫描
+
+`du` 扫大目录很慢(Users 目录可达数分钟),**必须 run_in_background 后台跑**,同时并行查其他线索,最后汇总。推荐三层递进:
+
+```bash
+# 1. 顶层分布(后台)
+du -s -B1 /c/Users /c/Windows "/c/Program Files" "/c/Program Files (x86)" /c/ProgramData
+
+# 2. 用户 AppData 两个子树(后台)
+du -s -B1 /c/Users/<user>/AppData/Local/*   | awk '$1>300000000 {printf "%.2f GB\t%s\n", $1/1073741824, $2}'
+du -s -B1 /c/Users/<user>/AppData/Roaming/* | awk '$1>100000000 {printf "%.2f GB\t%s\n", $1/1073741824, $2}'
+
+# 3. 系统级可清理项(很快)
+du -s -B1 /c/Windows/SoftwareDistribution/Download /c/Windows/Temp /c/Windows/Installer '/c/$Recycle.Bin'
+```
+
+### 已知热点清单(按出现频率与收益排序)
+
+| 路径(在 `%USERPROFILE%` 下) | 典型大小 | 性质 |
+|---|---|---|
+| `AppData\Local\Temp` | 5~15GB | `_MEI*` PyInstaller 程序残留(每个约 0.25GB,残留几十个很常见)、安装包 `.tmp` 残留 |
+| `AppData\Local\npm-cache` | 2~5GB | npm 缓存 |
+| `AppData\Local\Yarn` | 3~5GB | Yarn 缓存 |
+| `AppData\Local\uv` | 1~4GB | uv 缓存 |
+| `AppData\Roaming\Code\CachedExtensionVSIXs` | 1~2GB | VS Code 扩展安装包缓存 |
+| `AppData\Local\ms-playwright` | ~2GB | Playwright 浏览器 |
+| `AppData\Local\Google` | 5GB+ | Chrome 数据,只能清其中 Cache 子目录 |
+| `AppData\Roaming\Tencent`、微信/钉钉等 | 3~5GB | 聊天数据,**禁区** |
+
+先按这张表定向排查,再结合 du 扫描结果补充本机特有大户。
+
+## 第二步:分档清理
+
+分析完先给报告,按风险分档,**让用户选择执行范围**,不要擅自清理:
+
+- **第一档(零风险,默认推荐)**:Temp(保留活跃会话目录)、npm/Yarn/uv 缓存、VS Code `CachedExtensionVSIXs`。包缓存删后自动重建,代价只是下次装包慢一点。
+- **第二档(需用户确认)**:Playwright 浏览器、Chrome 的 Cache 子目录、各 AI IDE(TRAE/Code 等)的缓存目录。逐项说明用途后再删。
+- **禁区(无论用户多着急都不碰)**:Tencent/微信/QQ 数据、`Documents`、浏览器 Profile、`Windows\Installer`(卸载修复依赖)、用途不明的目录。
+
+### 执行要点
+
+Temp 清理保留活跃会话(如 ZCode 的 `zcode-bash-*` 前缀):
+
+```bash
+cd /c/Users/<user>/AppData/Local/Temp && for f in *; do case "$f" in zcode-bash-*) continue;; esac; rm -rf "$f" 2>/dev/null; done
+```
+
+包管理器优先用官方清理命令,比手动 rm 更干净:
+
+```bash
+npm cache clean --force
+yarn cache clean
+uv cache clean
+```
+
+## 第三步:缓存迁移(防复发,清理后主动建议)
+
+| 工具 | 配置方式 | 生效时机 |
+|---|---|---|
+| npm | `npm config set cache "D:\\cache\\npm"`(写入 ~/.npmrc) | 立即 |
+| uv | `setx UV_CACHE_DIR "D:\cache\uv"` | 新终端 |
+| Yarn 1.x | `setx YARN_CACHE_FOLDER "D:\cache\yarn"` | 新终端 |
+| Bun | `setx BUN_INSTALL "D:\cache\bun"` + 修改 PATH | 新终端 |
+
+- `setx` 写用户级注册表。验证一律用 PowerShell 读(`reg query /v` 的 `/v` 会被 Git Bash 转义成路径,不可用):
+  ```bash
+  powershell -NoProfile -Command "[Environment]::GetEnvironmentVariable('UV_CACHE_DIR','User')"
+  ```
+- 配置完成后用真实命令验证识别(`uv cache dir`、`npm config get cache`),不能只看 setx 报成功。
+
+### Bun 迁移的特殊坑
+
+bun 的缓存目录(`~/.bun/install/cache`)内部是**符号链接别名**(bun 的 Windows 兼容机制),直接 `cp -r` 会把链接展开成真实文件副本,体积翻倍、链接结构丢失。正确做法:
+
+1. `bin` 本体复制到新位置,验证可执行(`bun.exe --version`);
+2. **缓存直接删掉不搬**——纯可再生数据,bun 下次装包会在新位置自建正确结构;
+3. 删除旧 `~/.bun` 前先改 PATH,否则 bun 命令失效:
+   ```powershell
+   $p = (Get-Item 'HKCU:\Environment').GetValue('Path', '', 'DoNotExpandEnvironmentNames')
+   $new = $p.Replace('C:\Users\<user>\.bun\bin', 'D:\cache\bun\bin')
+   Set-ItemProperty -Path 'HKCU:\Environment' -Name Path -Value $new -Type ExpandString
+   ```
+
+## 踩坑记录(Git Bash 环境,均实测踩过)
+
+1. **PowerShell `$_` 被 Git Bash 吞掉** → 写成 `\$_`。
+2. **robocopy 的 `/MOVE` `/E` 斜杠参数被 MSYS 转义成路径** → 轻则无效、重则报错 16 什么都不做。要么加 `MSYS_NO_PATHCONV=1`,要么改用 `cp -rp`。
+3. **`cp` 复制含符号链接的目录会展开链接** → bun 缓存、node_modules 这类内容不要 cp,删掉重建。
+4. **搬运必须先校验再删源**:`du -s -B1` 对比两侧大小 + `find -type f | wc -l` 对比文件数;数字对不上(如翻倍)立即停下排查,**绝不先删源目录**。
+5. **大目录 du 必须后台跑**,前台超时白等;多个扫描任务并行发,统一等通知汇总。
+6. **已开终端读不到 setx 新值** → 汇报时提醒用户重开终端才生效。
+7. **rm -rf 大目录(几万文件)可能超过前台超时** → Temp 清理这种也要后台或容忍较长时间。
+
+## 验证与汇报
+
+清理完成后重查剩余空间,与清理前对比:
+
+```bash
+powershell -NoProfile -Command "Get-CimInstance Win32_LogicalDisk -Filter \"DeviceID='C:'\" | ForEach-Object { 'C盘剩余: {0:N1} GB' -f (\$_.FreeSpace/1GB) }"
+```
+
+汇报固定包含:**前后对比数字、逐项明细表、生效注意事项(重开终端/下次装包变慢)、长期建议(新项目与大工具装大容量盘)**。释放空间要如实报实测值,不估算。
